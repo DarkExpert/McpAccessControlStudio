@@ -7,6 +7,8 @@ using ModelContextProtocol;
 using ModelContextProtocol.AspNetCore;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
+using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting.Server.Features;
 
 namespace AccessControlStudio.Api;
 
@@ -138,9 +140,11 @@ public sealed class GatewayRuntime : IAsyncDisposable
 
     private static string AssertLoopbackEndpoint(WebApplication app)
     {
-        if (app.Urls.Count != 1 ||
-            !Uri.TryCreate(app.Urls.Single(), UriKind.Absolute, out var uri) ||
-            uri.Scheme != Uri.UriSchemeHttp || !uri.IsLoopback || uri.UserInfo.Length != 0 ||
+        // app.Urls may retain port 0 on Linux; Kestrel's bound-address feature has the actual port.
+        var addresses = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()?.Addresses;
+        if (addresses?.Count != 1 ||
+            !Uri.TryCreate(addresses.Single(), UriKind.Absolute, out var uri) ||
+            uri.Scheme != Uri.UriSchemeHttp || uri.Port == 0 || !uri.IsLoopback || uri.UserInfo.Length != 0 ||
             uri.Query.Length != 0 || uri.Fragment.Length != 0)
             throw new InvalidOperationException("CRM upstream must use one loopback HTTP listener.");
         return uri.AbsoluteUri.TrimEnd('/') + "/mcp";
