@@ -1,6 +1,6 @@
 # MCP Access Control Studio
 
-This is an **early .NET 10 reference implementation, not production ready**. M1 enforces validated JWT identity and the M0 role/argument policy inside real MCP `tools/call` requests. It is distinct from [MCP Sentinel](https://github.com/DarkExpert/mcp-sentinel); Sentinel's SDK transport, timeout and protocol tests informed this implementation without copying its gateway.
+This is an **early .NET 10 reference implementation, not production ready**. M2 adds persistent, sanitized SQLite security audit records and Admin-only reporting to M1's real MCP enforcement. It is distinct from [MCP Sentinel](https://github.com/DarkExpert/mcp-sentinel); Sentinel's SDK transport, timeout and protocol tests informed this implementation without copying its gateway.
 
 ## Architecture
 
@@ -16,7 +16,7 @@ Install .NET 10 and PowerShell 7.2+. From the repository root:
 pwsh -File ./scripts/run-demo.ps1
 ```
 
-The command builds Release, launches only its own loopback API process, obtains short-lived demo JWTs for Viewer, Operator and Admin, runs real SDK discovery and tool calls, checks allow/deny outcomes, and stops its process. It generates a fresh signing key and prints no token or tool response. The first run needs NuGet access.
+The command builds Release, launches only its own loopback API process, obtains short-lived demo JWTs for Viewer, Operator and Admin, runs real SDK discovery and tool calls, checks allow/deny outcomes and reporting, then restarts the API to verify SQLite persistence. It generates a fresh signing key and prints no token or tool response. The first run needs NuGet access.
 
 ## Manual local API
 
@@ -31,6 +31,14 @@ dotnet run --no-launch-profile --project src/AccessControlStudio.Api
 
 Seeded demo identities are `viewer`, `operator`, and `admin`. `POST /api/demo/token` with `{"identity":"viewer"}` issues a ten-minute token to a loopback client. The token response necessarily contains the requested token; keep it private. The sample SDK client shows the MCP connection and role scenarios.
 
+## Security audit and reporting
+
+The API writes a decision record before forwarding and a terminal record after each authenticated MCP `tools/call` handled by the gateway. Both share a server-generated correlation ID. Records contain only UTC time, validated subject and role, a known tool name (or `UnknownTool`), stable decision/reason/outcome codes, a safe error category, and duration. They contain no arguments, tokens, credentials, CRM responses, or exception text. Requests rejected by JWT authentication or the raw JSON guard do not reach the handler and have no attributed handler audit record.
+
+SQLite defaults to `data/security-audit.db` under the API content root. Override with `Audit__DatabasePath` for a protected local directory; database, WAL and SHM files are ignored by Git. The schema is initialized on startup and has a 20,000-row rolling retention limit. Back up and protect the database with filesystem permissions. This demo does not encrypt the database or manage backups.
+
+`GET /api/audit?limit=25&cursor=<id>` returns newest-first records and an optional `nextCursor`; limit is 1–100. `GET /api/security/overview` aggregates **persisted terminal records only**. Both require a validated Admin JWT. There is no public audit write API. An audit write failure is logged without sensitive details and does not change enforcement or retry an upstream call. Auditing is best effort: a storage failure can leave a missing decision or terminal record, so report counts are not proof of complete activity.
+
 ## Verify
 
 ```text
@@ -40,4 +48,4 @@ dotnet test -c Release
 pwsh -File ./scripts/run-demo.ps1
 ```
 
-No React dashboard, SQLite audit, production identity provider, cloud deployment, multitenancy, approvals, or exactly-once execution guarantee is included.
+No React dashboard, production identity provider, cloud deployment, multitenancy, SIEM, approvals, or exactly-once execution guarantee is included.

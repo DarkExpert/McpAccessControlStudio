@@ -10,6 +10,9 @@
 *.userosscache
 *.sln.docstates
 *.env
+*.db
+*.db-wal
+*.db-shm
 **/appsettings.*.local.json
 **/secrets.json
 

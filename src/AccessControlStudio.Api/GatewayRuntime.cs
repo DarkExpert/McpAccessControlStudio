@@ -1,4 +1,5 @@
 using System.IdentityModel.Tokens.Jwt;
+using System.Diagnostics;
 using System.Security.Claims;
 using System.Text.Json;
 using AccessControlStudio.Core;
@@ -100,11 +101,6 @@ public sealed class GatewayRuntime : IAsyncDisposable
     private async ValueTask<CallToolResult> CallAsync(CallToolRequestParams? parameters,
         IServiceProvider? services, string? protocolVersion, CancellationToken token)
     {
-        token.ThrowIfCancellationRequested();
-        var connection = upstream;
-        if (parameters is null || catalog?.Contains(parameters.Name) != true || connection is null)
-            return Denied("UnknownTool");
-
         var principal = services?.GetService<IHttpContextAccessor>()?.HttpContext?.User;
         if (principal?.Identity?.IsAuthenticated != true ||
             principal.FindAll(JwtRegisteredClaimNames.Sub).Count() != 1 ||
@@ -113,29 +109,72 @@ public sealed class GatewayRuntime : IAsyncDisposable
             !Enum.IsDefined(role))
             return Denied("InvalidIdentity");
 
-        AuthorizationDecision decision;
+        var subject = principal.FindFirstValue(JwtRegisteredClaimNames.Sub)!;
+        var audit = services!.GetRequiredService<AuditRecorder>();
+        var name = parameters?.Name ?? string.Empty;
+        var auditName = catalog?.Contains(name) == true ? name : "UnknownTool";
+        var correlation = Guid.NewGuid().ToString("N");
+        var started = Stopwatch.StartNew();
+        var reason = "InvalidArguments";
+        var decisionName = "Deny";
+        var enforcement = "Blocked";
+        var upstreamStatus = "NotAttempted";
+        string? errorCategory = null;
+        var allowed = false;
         try
         {
-            var arguments = JsonSerializer.SerializeToElement(parameters.Arguments);
-            decision = policy.Evaluate(new AuthorizationContext(
-                principal.FindFirstValue(JwtRegisteredClaimNames.Sub)!, role, parameters.Name, arguments));
+            if (parameters is null || catalog?.Contains(name) != true || upstream is null)
+                reason = "UnknownTool";
+            else
+            {
+                try
+                {
+                    var arguments = JsonSerializer.SerializeToElement(parameters.Arguments);
+                    var decision = policy.Evaluate(new AuthorizationContext(subject, role, name, arguments));
+                    reason = decision.Code.ToString();
+                    allowed = decision.Allowed;
+                }
+                catch (Exception) { reason = "InvalidArguments"; }
+            }
+
+            decisionName = allowed ? "Allow" : "Deny";
+            await audit.RecordAsync(new(0, correlation, "Decision", DateTimeOffset.UtcNow,
+                subject, role.ToString(), auditName, decisionName, reason, "Blocked", "NotAttempted", null, 0));
+            token.ThrowIfCancellationRequested();
+            if (!allowed) return Denied(reason);
+
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+            timeout.CancelAfter(OperationTimeout);
+            enforcement = "Forwarded";
+            // The application does not retry; SDK continuation may repeat an allowed operation.
+            var result = await upstream!.CallToolAsync(new CallToolRequestParams
+            {
+                Name = name,
+                Arguments = parameters!.Arguments
+            }, timeout.Token);
+            upstreamStatus = result.IsError == true ? "ToolError" : "Succeeded";
+            if (result.IsError == true) errorCategory = "ToolError";
+            return AdaptResult(result, protocolVersion);
+        }
+        catch (OperationCanceledException)
+        {
+            upstreamStatus = enforcement == "Forwarded" ? "Unknown" : "NotAttempted";
+            errorCategory = token.IsCancellationRequested ? "Canceled" : "Timeout";
+            throw;
         }
         catch (Exception)
         {
-            return Denied("InvalidArguments");
+            if (enforcement == "Forwarded" && upstreamStatus == "NotAttempted") upstreamStatus = "Unknown";
+            errorCategory = "GatewayError";
+            throw;
         }
-        if (!decision.Allowed)
-            return Denied(decision.Code.ToString());
-
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
-        timeout.CancelAfter(OperationTimeout);
-        // The application does not retry; SDK continuation may repeat an allowed operation.
-        var result = await connection.CallToolAsync(new CallToolRequestParams
+        finally
         {
-            Name = parameters.Name,
-            Arguments = parameters.Arguments
-        }, timeout.Token);
-        return AdaptResult(result, protocolVersion);
+            started.Stop();
+            await audit.RecordAsync(new(0, correlation, "Terminal", DateTimeOffset.UtcNow,
+                subject, role.ToString(), auditName, decisionName, reason, enforcement, upstreamStatus,
+                errorCategory, started.ElapsedMilliseconds));
+        }
     }
 
     private static string AssertLoopbackEndpoint(WebApplication app)

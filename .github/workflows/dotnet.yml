@@ -14,5 +14,7 @@ jobs:
           dotnet-version: '10.0.x'
       - run: dotnet restore
       - run: dotnet build -c Release --no-restore
-      - run: dotnet test -c Release --no-build
-      - run: pwsh -File ./scripts/run-demo.ps1
+      - name: Full Release suite including audit security regressions
+        run: dotnet test -c Release --no-build
+      - name: Real MCP and SQLite restart demonstration
+        run: pwsh -File ./scripts/run-demo.ps1

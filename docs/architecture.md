@@ -4,8 +4,9 @@ The .NET 10 solution has a framework-independent `Core`, an authenticated API/MC
 
 ```text
 SDK MCP client → JWT validation at /mcp → validated subject and role
-  → SDK tools/call handler → AuthorizationPolicy → catalog check
+  → SDK tools/call handler → AuthorizationPolicy → catalog check → audit decision
   → SDK Streamable HTTP client → loopback CRM MCP server
+  → audit terminal outcome
 ```
 
 | Tool | Viewer | Operator | Admin |
@@ -26,10 +27,16 @@ The API creates an internal CRM server bound to an ephemeral `127.0.0.1` port. B
 
 Startup discovery and each forwarded operation have ten-second budgets. The upstream HTTP client disallows redirects and system proxies. Caller cancellation is linked to the forwarding budget. The application has no retry loop, but SDK continuation can reissue an allowed upstream request. Cancellation, timeout or error **after forwarding** does not establish that no upstream side effect occurred; exactly-once execution is not guaranteed.
 
+## M2 audit boundary
+
+`SecurityAuditEvent` is a fixed allowlist of fields. The handler creates an opaque correlation ID for each authenticated `tools/call`, records a decision before forwarding, and records one terminal outcome in `finally`. Unknown client-supplied tool names are replaced with `UnknownTool` in storage. Denials remain blocked regardless of audit availability. `AuditRecorder` catches write failures, emits a generic warning, and never retries forwarding. Its independent two-second write budget lets it attempt a terminal record after client cancellation. A crash, storage failure or write timeout can leave incomplete pairs. JWT and raw JSON guard rejections occur before this handler and are not attributed in this audit.
+
+`SqliteAuditStore` uses parameterized commands, per-operation connections, serialized transactional writes, a schema version, and a 20,000-row retention cap. It creates the file at startup; initialization failure stops the API. The local database has no encryption or built-in backup. Access to the path, WAL and SHM files must be controlled by the host. Reads use descending row IDs and a bounded cursor/limit. Admin-only REST endpoints expose sanitized records and aggregate **persisted terminal rows**. Reports are not completeness guarantees. There is no public write endpoint. The store and authorization policy have separate responsibilities.
+
 ## Security limits
 
 The demo issuer operates only in Development for loopback transport peers, never from forwarded IP headers. A reverse proxy connecting locally would itself be a loopback peer, so do not expose the demo route through one. The signing key must be externally supplied and cryptographically random; length alone does not verify entropy. Production requires a distinct configured issuer and key, but production identity management and key rotation are not included.
 
-The CRM listener is loopback-only, but another local process could reach it directly and bypass the gateway. Host isolation is required before using this pattern with real data. CRM data and tool schemas are demonstration content; no prompt-injection filtering or durable audit exists. SDK diagnostic logging is disabled, and application code does not log bearer tokens, credentials, tool arguments or result payloads. The demo token response necessarily contains its issued token.
+The CRM listener is loopback-only, but another local process could reach it directly and bypass the gateway. Host isolation is required before using this pattern with real data. CRM data and tool schemas are demonstration content; no prompt-injection filtering exists. SDK diagnostic logging is disabled, and application code does not log bearer tokens, credentials, tool arguments or result payloads. The demo token response necessarily contains its issued token.
 
-The REST evaluation endpoint never executes a tool. Dashboard, SQLite persistence, enterprise identity providers, multitenancy, multiple upstream servers, approvals and cloud deployment remain out of scope.
+The REST evaluation endpoint never executes a tool. Dashboard, enterprise identity providers, multitenancy, multiple upstream servers, approvals and cloud deployment remain out of scope.

@@ -55,14 +55,42 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJw
     };
 });
 builder.Services.AddAuthorization();
+builder.Services.AddAuthorizationBuilder().AddPolicy("AuditAdmin", policyBuilder =>
+    policyBuilder.RequireAuthenticatedUser().RequireRole(nameof(StudioRole.Admin)));
+var auditPath = builder.Configuration["Audit:DatabasePath"];
+if (string.IsNullOrWhiteSpace(auditPath))
+    auditPath = Path.Combine(builder.Environment.ContentRootPath, "data", "security-audit.db");
+builder.Services.AddSingleton(new SqliteAuditStore(auditPath));
+builder.Services.AddSingleton<IAuditWriter>(services => services.GetRequiredService<SqliteAuditStore>());
+builder.Services.AddSingleton<AuditRecorder>();
 var gateway = GatewayRuntime.Register(builder, policy);
 var app = builder.Build();
 app.Lifetime.ApplicationStopped.Register(() => gateway.DisposeAsync().AsTask().GetAwaiter().GetResult());
+await app.Services.GetRequiredService<SqliteAuditStore>().InitializeAsync();
 await gateway.InitializeAsync();
 app.UseAuthentication();
 app.UseAuthorization();
 app.Use(McpRequestGuard.CheckAsync);
 app.MapMcp("/mcp").RequireAuthorization();
+
+app.MapGet("/api/audit", async (int? limit, long? cursor, SqliteAuditStore store, CancellationToken token) =>
+{
+    if (limit is < 1 or > 100 || cursor is <= 0)
+        return Results.BadRequest(new { code = "InvalidPagination" });
+    try { return Results.Ok(await store.ReadPageAsync(limit ?? 25, cursor, token)); }
+    catch (Exception) when (!token.IsCancellationRequested)
+    {
+        return Results.Json(new { code = "AuditUnavailable" }, statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+}).RequireAuthorization("AuditAdmin");
+app.MapGet("/api/security/overview", async (SqliteAuditStore store, CancellationToken token) =>
+{
+    try { return Results.Ok(await store.ReadOverviewAsync(token)); }
+    catch (Exception) when (!token.IsCancellationRequested)
+    {
+        return Results.Json(new { code = "AuditUnavailable" }, statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+}).RequireAuthorization("AuditAdmin");
 
 // This endpoint evaluates policy only. It never invokes an MCP tool.
 app.MapPost("/api/authorization/evaluate", (EvaluationRequest request, ClaimsPrincipal user, AuthorizationPolicy policy) =>
