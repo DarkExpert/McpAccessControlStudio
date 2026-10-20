@@ -105,6 +105,35 @@ public class AuditTests
         await factory.Services.GetRequiredService<SqliteAuditStore>().ReadPageAsync(100, null, default);
 
     [Fact]
+    public async Task UnsupportedSchemaVersionLeavesExistingDatabaseUnchanged()
+    {
+        var path = Database();
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        await using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Pooling = false }.ToString()))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "CREATE TABLE sentinel (value TEXT NOT NULL); INSERT INTO sentinel VALUES ('retain-me'); PRAGMA user_version = 99;";
+            await command.ExecuteNonQueryAsync();
+        }
+        var before = await File.ReadAllBytesAsync(path);
+        var store = new SqliteAuditStore(path);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.InitializeAsync());
+        Assert.Equal(before, await File.ReadAllBytesAsync(path));
+        Assert.False(File.Exists(path + "-wal"));
+        Assert.False(File.Exists(path + "-shm"));
+        await using var verify = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Pooling = false }.ToString());
+        await verify.OpenAsync();
+        await using var query = verify.CreateCommand();
+        query.CommandText = "SELECT value FROM sentinel;";
+        Assert.Equal("retain-me", await query.ExecuteScalarAsync());
+        query.CommandText = "PRAGMA user_version;";
+        Assert.Equal(99L, await query.ExecuteScalarAsync());
+        query.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE name = 'audit_events';";
+        Assert.Equal(0L, await query.ExecuteScalarAsync());
+    }
+
+    [Fact]
     public async Task AllowedDeniedAndUnknownCallsHavePairedSafeEventsAndCorrectAttribution()
     {
         using var factory = Factory(Database());
@@ -128,6 +157,11 @@ public class AuditTests
                 Assert.True(e.DurationMs >= 0);
             });
         }
+        Assert.All(events.Where(e => e.Kind == "Decision"), e =>
+        {
+            Assert.Equal("Pending", e.Enforcement);
+            Assert.Equal("NotAttempted", e.UpstreamStatus);
+        });
         Assert.Contains(events, e => e.Kind == "Terminal" && e.ToolName == "crm.get_customer" &&
             e.Decision == "Allow" && e.ReasonCode == "Allowed" && e.Enforcement == "Forwarded" && e.UpstreamStatus == "Succeeded");
         Assert.Contains(events, e => e.Kind == "Terminal" && e.ToolName == "crm.delete_customer" &&
@@ -215,6 +249,8 @@ public class AuditTests
             Assert.Equal(2, summary.RootElement.GetProperty("persistedTerminalCount").GetInt64());
             Assert.Equal(1, summary.RootElement.GetProperty("allowed").GetInt64());
             Assert.Equal(1, summary.RootElement.GetProperty("denied").GetInt64());
+            Assert.Equal(1, summary.RootElement.GetProperty("forwarded").GetInt64());
+            Assert.Equal(1, summary.RootElement.GetProperty("blocked").GetInt64());
             Assert.DoesNotContain(viewer, await page.Content.ReadAsStringAsync());
         }
         using var restarted = Factory(path);

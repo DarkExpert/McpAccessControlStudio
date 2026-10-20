@@ -139,7 +139,7 @@ public sealed class GatewayRuntime : IAsyncDisposable
 
             decisionName = allowed ? "Allow" : "Deny";
             await audit.RecordAsync(new(0, correlation, "Decision", DateTimeOffset.UtcNow,
-                subject, role.ToString(), auditName, decisionName, reason, "Blocked", "NotAttempted", null, 0));
+                subject, role.ToString(), auditName, decisionName, reason, "Pending", "NotAttempted", null, 0));
             token.ThrowIfCancellationRequested();
             if (!allowed) return Denied(reason);
 

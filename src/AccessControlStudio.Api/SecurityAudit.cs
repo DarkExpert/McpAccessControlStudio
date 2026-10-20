@@ -40,6 +40,10 @@ public sealed class SqliteAuditStore : IAuditWriter
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         await using var connection = await OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA user_version;";
+        var version = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken));
+        if (version is not (0 or 1)) throw new InvalidOperationException("Unsupported audit database schema.");
+
         command.CommandText = "PRAGMA journal_mode = WAL;";
         await command.ExecuteNonQueryAsync(cancellationToken);
         command.CommandText = """
@@ -54,9 +58,6 @@ public sealed class SqliteAuditStore : IAuditWriter
             CREATE INDEX IF NOT EXISTS ix_audit_correlation ON audit_events(correlation_id);
             """;
         await command.ExecuteNonQueryAsync(cancellationToken);
-        command.CommandText = "PRAGMA user_version;";
-        var version = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken));
-        if (version is not (0 or 1)) throw new InvalidOperationException("Unsupported audit database schema.");
         if (version == 0)
         {
             command.CommandText = "PRAGMA user_version = 1;";
