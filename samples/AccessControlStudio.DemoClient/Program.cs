@@ -13,6 +13,7 @@ try
         throw new InvalidOperationException("Pass the built API DLL path.");
     var apiDll = Path.GetFullPath(args[0]);
     var key = Convert.ToBase64String(RandomNumberGenerator.GetBytes(64));
+    var auditPath = Path.Combine(Path.GetTempPath(), "AccessControlStudio.Demo", Guid.NewGuid() + ".db");
     var port = ReserveEphemeralPort();
     var origin = new Uri($"http://127.0.0.1:{port}");
     var start = new ProcessStartInfo("dotnet")
@@ -27,6 +28,7 @@ try
     start.ArgumentList.Add(origin.AbsoluteUri);
     start.Environment["ASPNETCORE_ENVIRONMENT"] = "Development";
     start.Environment["Jwt__SigningKey"] = key;
+    start.Environment["Audit__DatabasePath"] = auditPath;
     using var server = Process.Start(start) ?? throw new InvalidOperationException("Could not start API.");
     server.OutputDataReceived += (_, _) => { };
     server.ErrorDataReceived += (_, _) => { };
@@ -44,6 +46,9 @@ try
         Console.WriteLine("Gateway ready on loopback; CRM upstream is internal.");
 
         var viewer = await GetToken(http, "viewer", budget.Token);
+        using (var viewerReport = await Report(http, viewer, budget.Token))
+            if (viewerReport.StatusCode != HttpStatusCode.Forbidden)
+                throw new InvalidOperationException("Viewer reached global audit reporting.");
         await using (var connection = await Connect(origin, viewer, budget.Token))
         {
             var names = (await connection.Client.ListToolsAsync(cancellationToken: budget.Token))
@@ -75,6 +80,47 @@ try
             await Allowed(connection.Client, "crm.delete_customer", new() { ["customerId"] = "customer-1" }, budget.Token);
             Console.WriteLine("Admin: export and delete allowed.");
         }
+        using (var report = await Report(http, adminToken, budget.Token))
+        {
+            report.EnsureSuccessStatusCode();
+            using var json = JsonDocument.Parse(await report.Content.ReadAsStringAsync(budget.Token));
+            if (json.RootElement.GetProperty("persistedTerminalCount").GetInt64() != 10)
+                throw new InvalidOperationException("Unexpected persisted audit count.");
+        }
+        Console.WriteLine("Admin: persisted overview reports 10 MCP calls; Viewer reporting blocked.");
+
+        server.Kill(entireProcessTree: true);
+        await server.WaitForExitAsync(budget.Token);
+        var restartedOrigin = new Uri($"http://127.0.0.1:{ReserveEphemeralPort()}");
+        start.ArgumentList[2] = restartedOrigin.AbsoluteUri;
+        using var restarted = Process.Start(start) ?? throw new InvalidOperationException("Could not restart API.");
+        restarted.OutputDataReceived += (_, _) => { };
+        restarted.ErrorDataReceived += (_, _) => { };
+        restarted.BeginOutputReadLine();
+        restarted.BeginErrorReadLine();
+        try
+        {
+            using var restartedHttp = new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false })
+            {
+                BaseAddress = restartedOrigin, Timeout = TimeSpan.FromSeconds(10)
+            };
+            await WaitUntilReady(restartedHttp, restarted, budget.Token);
+            var restartedAdmin = await GetToken(restartedHttp, "admin", budget.Token);
+            using var report = await Report(restartedHttp, restartedAdmin, budget.Token);
+            report.EnsureSuccessStatusCode();
+            using var json = JsonDocument.Parse(await report.Content.ReadAsStringAsync(budget.Token));
+            if (json.RootElement.GetProperty("persistedTerminalCount").GetInt64() != 10)
+                throw new InvalidOperationException("Audit records did not survive restart.");
+            Console.WriteLine("SQLite audit records survived API restart.");
+        }
+        finally
+        {
+            if (!restarted.HasExited)
+            {
+                restarted.Kill(entireProcessTree: true);
+                await restarted.WaitForExitAsync();
+            }
+        }
         Console.WriteLine("Real MCP SDK demonstration passed.");
     }
     finally
@@ -84,6 +130,8 @@ try
             server.Kill(entireProcessTree: true);
             await server.WaitForExitAsync();
         }
+        foreach (var suffix in new[] { "", "-wal", "-shm" })
+            File.Delete(auditPath + suffix);
     }
     return 0;
 }
@@ -125,6 +173,13 @@ static async Task<string> GetToken(HttpClient http, string identity, Cancellatio
     response.EnsureSuccessStatusCode();
     using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(token));
     return json.RootElement.GetProperty("accessToken").GetString()!;
+}
+
+static Task<HttpResponseMessage> Report(HttpClient http, string token, CancellationToken cancellation)
+{
+    using var request = new HttpRequestMessage(HttpMethod.Get, "/api/security/overview");
+    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+    return http.SendAsync(request, cancellation);
 }
 
 static async Task<Connection> Connect(Uri origin, string token, CancellationToken cancellation)
