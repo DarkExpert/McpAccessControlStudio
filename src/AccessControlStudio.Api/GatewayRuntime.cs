@@ -2,6 +2,7 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Diagnostics;
 using System.Security.Claims;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using AccessControlStudio.Core;
 using AccessControlStudio.CrmDemo;
 using ModelContextProtocol;
@@ -141,7 +142,9 @@ public sealed class GatewayRuntime : IAsyncDisposable
             await audit.RecordAsync(new(0, correlation, "Decision", DateTimeOffset.UtcNow,
                 subject, role.ToString(), auditName, decisionName, reason, "Pending", "NotAttempted", null, 0));
             token.ThrowIfCancellationRequested();
-            if (!allowed) return Denied(reason);
+            if (!allowed)
+                return WithExecutionMeta(Denied(reason), correlation, decisionName, reason,
+                    "Blocked", "NotAttempted");
 
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
             timeout.CancelAfter(OperationTimeout);
@@ -154,7 +157,8 @@ public sealed class GatewayRuntime : IAsyncDisposable
             }, timeout.Token);
             upstreamStatus = result.IsError == true ? "ToolError" : "Succeeded";
             if (result.IsError == true) errorCategory = "ToolError";
-            return AdaptResult(result, protocolVersion);
+            return WithExecutionMeta(AdaptResult(result, protocolVersion), correlation,
+                decisionName, reason, enforcement, upstreamStatus);
         }
         catch (OperationCanceledException)
         {
@@ -213,6 +217,21 @@ public sealed class GatewayRuntime : IAsyncDisposable
         IsError = true,
         Content = [new TextContentBlock { Text = $"Tool execution denied: {code}." }]
     };
+
+    private static CallToolResult WithExecutionMeta(CallToolResult result, string correlation,
+        string decision, string reason, string enforcement, string upstreamStatus)
+    {
+        result.Meta ??= new JsonObject();
+        result.Meta["accessControlStudio"] = new JsonObject
+        {
+            ["correlationId"] = correlation,
+            ["decision"] = decision,
+            ["reasonCode"] = reason,
+            ["enforcement"] = enforcement,
+            ["upstreamStatus"] = upstreamStatus
+        };
+        return result;
+    }
 
     public async ValueTask DisposeAsync()
     {

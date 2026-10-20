@@ -7,6 +7,7 @@ public enum StudioRole { Viewer, Operator, Admin }
 public enum DecisionCode { Allowed, UnknownTool, RoleDenied, InvalidArguments, AmountLimitExceeded }
 public sealed record AuthorizationContext(string Subject, StudioRole Role, string ToolName, JsonElement Arguments);
 public sealed record AuthorizationDecision(bool Allowed, DecisionCode Code);
+public sealed record ToolPolicyDescriptor(string Name, IReadOnlyList<string> AllowedRoles, decimal? MaximumAmount);
 
 public sealed class AuthorizationPolicy
 {
@@ -20,6 +21,13 @@ public sealed class AuthorizationPolicy
             ["crm.delete_customer"] = new(new[] { StudioRole.Admin }.ToFrozenSet()),
             ["crm.export_customers"] = new(new[] { StudioRole.Admin }.ToFrozenSet())
         }.ToFrozenDictionary(StringComparer.Ordinal);
+
+    public IReadOnlyList<ToolPolicyDescriptor> DescribeTools() => Rules
+        .OrderBy(entry => entry.Key, StringComparer.Ordinal)
+        .Select(entry => new ToolPolicyDescriptor(entry.Key,
+            entry.Value.Roles.OrderBy(role => role).Select(role => role.ToString()).ToArray(),
+            entry.Value.MaximumAmount))
+        .ToArray();
 
     public AuthorizationDecision Evaluate(AuthorizationContext context)
     {
