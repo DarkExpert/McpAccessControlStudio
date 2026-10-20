@@ -12,7 +12,7 @@ See [architecture](docs/architecture.md) for trust boundaries and the complete p
 
 ## Local demo
 
-Install .NET 10. Supply a unique, random signing key of at least 32 UTF-8 bytes through `Jwt__SigningKey` (environment variable) or ASP.NET user secrets. Never commit this key. Run only on loopback in Development. The demo identity endpoint is unauthenticated by design and exists only in Development.
+Install .NET 10. Supply a unique, **cryptographically random** signing key of at least 32 UTF-8 bytes through `Jwt__SigningKey` (environment variable) or ASP.NET user secrets. A long password or example string is not an adequate signing key; the API checks length but cannot verify entropy. Never commit this key. Run only on loopback in Development. The unauthenticated demo identity endpoint accepts only clients whose transport peer address is loopback, regardless of forwarded IP headers; it is absent outside Development. Do not expose this route through a reverse proxy: a local proxy appears as a loopback peer even for remote users.
 
 ```powershell
 $env:ASPNETCORE_ENVIRONMENT = "Development"

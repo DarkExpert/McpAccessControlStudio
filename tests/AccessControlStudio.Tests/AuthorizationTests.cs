@@ -4,11 +4,15 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using AccessControlStudio.Core;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.Tokens;
 
@@ -17,7 +21,8 @@ namespace AccessControlStudio.Tests;
 public class AuthorizationTests
 {
     private static readonly AuthorizationPolicy Policy = new();
-    private const string Key = "integration-test-signing-key-64-bytes-minimum-for-algorithm-regression-123";
+    private static readonly string Key = Convert.ToBase64String(RandomNumberGenerator.GetBytes(64));
+    private static readonly string WrongKey = Convert.ToBase64String(RandomNumberGenerator.GetBytes(64));
     private const string Issuer = "AccessControlStudio.Demo";
     private const string Audience = "AccessControlStudio.Api";
 
@@ -71,23 +76,40 @@ public class AuthorizationTests
         Assert.Equal(code, decision.Code);
     }
 
-    private static WebApplicationFactory<Program> Factory(string environment = "Development", ILoggerProvider? logger = null) =>
+    private static WebApplicationFactory<Program> Factory(string environment = "Development", ILoggerProvider? logger = null,
+        IPAddress? remoteAddress = null) =>
         new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.UseEnvironment(environment);
             builder.UseSetting("Jwt:SigningKey", Key);
             if (environment != "Development") builder.UseSetting("Jwt:Issuer", "Production.Test.Issuer");
             if (logger is not null) builder.ConfigureLogging(logging => logging.AddProvider(logger));
+            builder.ConfigureTestServices(services =>
+                services.AddTransient<IStartupFilter>(_ => new RemoteAddressFilter(remoteAddress ?? IPAddress.Loopback)));
         });
+
+    private sealed class RemoteAddressFilter(IPAddress address) : IStartupFilter
+    {
+        public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next) => app =>
+        {
+            app.Use((context, continuation) =>
+            {
+                context.Connection.RemoteIpAddress = address;
+                return continuation();
+            });
+            next(app);
+        };
+    }
 
     private static string Token(string subject = "viewer", string role = "Viewer",
         string issuer = Issuer, string audience = Audience, string? key = null,
         string algorithm = SecurityAlgorithms.HmacSha256, DateTime? expires = null,
-        bool includeSubject = true, bool includeRole = true)
+        bool includeSubject = true, bool includeRole = true, IEnumerable<Claim>? additionalClaims = null)
     {
         var claims = new List<Claim>();
         if (includeSubject) claims.Add(new(JwtRegisteredClaimNames.Sub, subject));
         if (includeRole) claims.Add(new("role", role));
+        if (additionalClaims is not null) claims.AddRange(additionalClaims);
         var jwt = new JwtSecurityToken(issuer, audience, claims,
             notBefore: DateTime.UtcNow.AddMinutes(-20),
             expires: expires ?? DateTime.UtcNow.AddMinutes(5),
@@ -125,7 +147,7 @@ public class AuthorizationTests
             "missing" => null,
             "invalid" => "not-a-jwt",
             "expired" => Token(expires: DateTime.UtcNow.AddMinutes(-1)),
-            "tampered" => Token(key: "different-integration-test-signing-key-32-bytes"),
+            "tampered" => Token(key: WrongKey),
             "issuer" => Token(issuer: "another-issuer"),
             "audience" => Token(audience: "another-audience"),
             "algorithm" => Token(algorithm: SecurityAlgorithms.HmacSha384),
@@ -136,6 +158,32 @@ public class AuthorizationTests
         using var response = await Evaluate(client, token);
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
         Assert.DoesNotContain(Key, await response.Content.ReadAsStringAsync());
+    }
+
+    [Theory]
+    [InlineData("duplicate-subject")]
+    [InlineData("duplicate-role")]
+    [InlineData("undefined-role")]
+    [InlineData("malformed-role")]
+    [InlineData("case-variant-role")]
+    public async Task InvalidIdentityClaimsFailClosed(string scenario)
+    {
+        using var factory = Factory();
+        using var client = factory.CreateClient();
+        var token = scenario switch
+        {
+            "duplicate-subject" => Token(additionalClaims: [new Claim(JwtRegisteredClaimNames.Sub, "admin")]),
+            "duplicate-role" => Token(additionalClaims: [new Claim("role", "Admin")]),
+            "undefined-role" => Token(role: "999"),
+            "malformed-role" => Token(role: "Admin,Operator"),
+            "case-variant-role" => Token(role: "admin"),
+            _ => throw new InvalidOperationException()
+        };
+        using var response = await Evaluate(client, token);
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(token, body);
+        Assert.DoesNotContain(Key, body);
     }
 
     [Fact]
@@ -219,6 +267,42 @@ public class AuthorizationTests
         using var productionClient = production.CreateClient();
         using var unavailable = await productionClient.PostAsJsonAsync("/api/demo/token", new { identity = "admin" });
         Assert.Equal(HttpStatusCode.NotFound, unavailable.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("127.0.0.1")]
+    [InlineData("::1")]
+    [InlineData("::ffff:127.0.0.1")]
+    public async Task LoopbackDevelopmentClientCanRequestDemoToken(string address)
+    {
+        using var factory = Factory(remoteAddress: IPAddress.Parse(address));
+        using var client = factory.CreateClient();
+        using var response = await client.PostAsJsonAsync("/api/demo/token", new { identity = "viewer" });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.False(string.IsNullOrWhiteSpace(document.RootElement.GetProperty("accessToken").GetString()));
+    }
+
+    [Fact]
+    public async Task RemoteDevelopmentClientIsRejectedDespiteSpoofedForwardedHeaders()
+    {
+        var logger = new CaptureLoggerProvider();
+        using var factory = Factory(logger: logger, remoteAddress: IPAddress.Parse("203.0.113.10"));
+        using var client = factory.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/demo/token")
+        {
+            Content = JsonContent.Create(new { identity = "admin", password = "CREDENTIAL_MARKER" })
+        };
+        request.Headers.Add("X-Forwarded-For", "127.0.0.1");
+        request.Headers.Add("X-Real-IP", "::1");
+        using var response = await client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("accessToken", body);
+        Assert.DoesNotContain("CREDENTIAL_MARKER", body);
+        var logs = string.Join("\n", logger.Messages);
+        Assert.DoesNotContain("CREDENTIAL_MARKER", logs);
+        Assert.DoesNotContain(Key, logs);
     }
 
     [Fact]

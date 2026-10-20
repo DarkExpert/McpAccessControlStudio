@@ -1,4 +1,5 @@
 using System.IdentityModel.Tokens.Jwt;
+using System.Net;
 using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
@@ -66,8 +67,14 @@ app.MapPost("/api/authorization/evaluate", (EvaluationRequest request, ClaimsPri
 
 if (app.Environment.IsDevelopment())
 {
-    app.MapPost("/api/demo/token", (DemoTokenRequest request) =>
+    app.MapPost("/api/demo/token", (HttpContext context, DemoTokenRequest request) =>
     {
+        // Use the transport peer, never X-Forwarded-For or another client-supplied header.
+        // A null address is not evidence of a local client.
+        if (context.Connection.RemoteIpAddress is not IPAddress remoteAddress ||
+            !IPAddress.IsLoopback(remoteAddress.IsIPv4MappedToIPv6 ? remoteAddress.MapToIPv4() : remoteAddress))
+            return Results.StatusCode(StatusCodes.Status403Forbidden);
+
         var identities = new Dictionary<string, StudioRole>(StringComparer.Ordinal)
         {
             ["viewer"] = StudioRole.Viewer,
