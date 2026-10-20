@@ -1,7 +1,11 @@
 <Solution>
+  <Folder Name="/samples/">
+    <Project Path="samples/AccessControlStudio.DemoClient/AccessControlStudio.DemoClient.csproj" />
+  </Folder>
   <Folder Name="/src/">
     <Project Path="src/AccessControlStudio.Api/AccessControlStudio.Api.csproj" />
     <Project Path="src/AccessControlStudio.Core/AccessControlStudio.Core.csproj" />
+    <Project Path="src/AccessControlStudio.CrmDemo/AccessControlStudio.CrmDemo.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/AccessControlStudio.Tests/AccessControlStudio.Tests.csproj" />

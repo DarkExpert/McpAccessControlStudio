@@ -4,8 +4,10 @@ using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
 using AccessControlStudio.Core;
+using AccessControlStudio.Api;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
+using ModelContextProtocol.AspNetCore;
 
 var builder = WebApplication.CreateBuilder(args);
 var issuer = builder.Configuration["Jwt:Issuer"] ?? "AccessControlStudio.Demo";
@@ -17,7 +19,8 @@ if (string.IsNullOrEmpty(signingSecret) || Encoding.UTF8.GetByteCount(signingSec
     throw new InvalidOperationException("Jwt:SigningKey must be supplied externally and contain at least 32 UTF-8 bytes.");
 var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(signingSecret));
 
-builder.Services.AddSingleton<AuthorizationPolicy>();
+var policy = new AuthorizationPolicy();
+builder.Services.AddSingleton(policy);
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(options =>
 {
     options.MapInboundClaims = false;
@@ -52,9 +55,14 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJw
     };
 });
 builder.Services.AddAuthorization();
+var gateway = GatewayRuntime.Register(builder, policy);
 var app = builder.Build();
+app.Lifetime.ApplicationStopped.Register(() => gateway.DisposeAsync().AsTask().GetAwaiter().GetResult());
+await gateway.InitializeAsync();
 app.UseAuthentication();
 app.UseAuthorization();
+app.Use(McpRequestGuard.CheckAsync);
+app.MapMcp("/mcp").RequireAuthorization();
 
 // This endpoint evaluates policy only. It never invokes an MCP tool.
 app.MapPost("/api/authorization/evaluate", (EvaluationRequest request, ClaimsPrincipal user, AuthorizationPolicy policy) =>

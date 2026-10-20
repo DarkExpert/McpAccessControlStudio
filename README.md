@@ -1,34 +1,35 @@
 # MCP Access Control Studio
 
-This is an **early reference implementation, not production ready**. Milestone M0 provides identity-aware policy evaluation. It does not execute MCP tools or protect an MCP server. Authentication happens only at the API boundary; the next milestone must enforce identity and decisions in the actual MCP gateway. This project is separate from [MCP Sentinel](https://github.com/DarkExpert/mcp-sentinel), whose fail-closed and exact-name policy patterns informed this foundation.
+This is an **early .NET 10 reference implementation, not production ready**. M1 enforces validated JWT identity and the M0 role/argument policy inside real MCP `tools/call` requests. It is distinct from [MCP Sentinel](https://github.com/DarkExpert/mcp-sentinel); Sentinel's SDK transport, timeout and protocol tests informed this implementation without copying its gateway.
 
 ## Architecture
 
-- `AccessControlStudio.Core`: framework-independent, immutable role and tool policy. Unknown tools default to deny. Tool names use exact, case-sensitive ordinal matching.
-- `AccessControlStudio.Api`: validates signed HS256 JWTs and derives subject and role exclusively from validated claims. `POST /api/authorization/evaluate` evaluates a request; it never executes a tool.
-- `AccessControlStudio.Tests`: role matrix, argument constraints and HTTP authentication regression tests.
+An SDK MCP client connects to authenticated `/mcp` over Streamable HTTP. The API validates the JWT, then the SDK call handler evaluates the exact tool name and decoded arguments with the existing `AccessControlStudio.Core.AuthorizationPolicy`. Only an explicit allow for a tool in the startup-validated CRM catalog is forwarded through an SDK client to the seeded CRM server. The CRM server listens on an ephemeral loopback port inside the API process and has no public management or counter endpoint. `/api/authorization/evaluate` remains a policy-only endpoint.
 
-See [architecture](docs/architecture.md) for trust boundaries and the complete policy matrix.
+The five demo tools are `crm.get_customer`, `crm.list_orders`, `crm.update_order`, `crm.delete_customer`, and `crm.export_customers`. See [architecture](docs/architecture.md) for the role matrix, trust boundaries, and result behavior.
 
-## Local demo
+## One-command real MCP demo
 
-Install .NET 10. Supply a unique, **cryptographically random** signing key of at least 32 UTF-8 bytes through `Jwt__SigningKey` (environment variable) or ASP.NET user secrets. A long password or example string is not an adequate signing key; the API checks length but cannot verify entropy. Never commit this key. Run only on loopback in Development. The unauthenticated demo identity endpoint accepts only clients whose transport peer address is loopback, regardless of forwarded IP headers; it is absent outside Development. Do not expose this route through a reverse proxy: a local proxy appears as a loopback peer even for remote users.
+Install .NET 10 and PowerShell 7.2+. From the repository root:
+
+```powershell
+pwsh -File ./scripts/run-demo.ps1
+```
+
+The command builds Release, launches only its own loopback API process, obtains short-lived demo JWTs for Viewer, Operator and Admin, runs real SDK discovery and tool calls, checks allow/deny outcomes, and stops its process. It generates a fresh signing key and prints no token or tool response. The first run needs NuGet access.
+
+## Manual local API
+
+Supply a unique **cryptographically random** signing key of at least 32 UTF-8 bytes through `Jwt__SigningKey` or user secrets. Length cannot prove entropy. Never commit the key. The demo token issuer is unauthenticated, restricted to loopback transport peers in Development, and absent outside Development. Do not expose the API or the demo route through a reverse proxy: a local proxy appears as a loopback peer even for remote users.
 
 ```powershell
 $env:ASPNETCORE_ENVIRONMENT = "Development"
 $env:ASPNETCORE_URLS = "http://127.0.0.1:5077"
-$env:Jwt__SigningKey = [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(48))
+$env:Jwt__SigningKey = [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(64))
 dotnet run --no-launch-profile --project src/AccessControlStudio.Api
 ```
 
-In another shell:
-
-```powershell
-$token = (Invoke-RestMethod -Method Post -Uri http://127.0.0.1:5077/api/demo/token -ContentType application/json -Body '{"identity":"operator"}').accessToken
-Invoke-RestMethod -Method Post -Uri http://127.0.0.1:5077/api/authorization/evaluate -Headers @{Authorization="Bearer $token"} -ContentType application/json -Body '{"toolName":"crm.update_order","arguments":{"amount":50}}'
-```
-
-Valid demo identities are `viewer`, `operator`, and `admin`. Tokens expire after ten minutes. The token response necessarily contains the requested demo token; evaluation responses contain only an allow flag and stable reason code. Do not use the demo issuer as an identity provider.
+Seeded demo identities are `viewer`, `operator`, and `admin`. `POST /api/demo/token` with `{"identity":"viewer"}` issues a ten-minute token to a loopback client. The token response necessarily contains the requested token; keep it private. The sample SDK client shows the MCP connection and role scenarios.
 
 ## Verify
 
@@ -36,6 +37,7 @@ Valid demo identities are `viewer`, `operator`, and `admin`. Tokens expire after
 dotnet restore
 dotnet build -c Release
 dotnet test -c Release
+pwsh -File ./scripts/run-demo.ps1
 ```
 
-No dashboard, database, MCP gateway, tool forwarding, approval workflow, or production identity integration exists in this milestone.
+No React dashboard, SQLite audit, production identity provider, cloud deployment, multitenancy, approvals, or exactly-once execution guarantee is included.

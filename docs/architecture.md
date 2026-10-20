@@ -1,8 +1,14 @@
 # Architecture and security boundary
 
-`Core` has no ASP.NET or MCP dependency. `AuthorizationPolicy` holds a frozen map of exact ordinal tool names to immutable role sets. Its inputs are a typed `AuthorizationContext` containing a validated subject, role, tool name and JSON arguments. Its outputs are an allow flag and a stable reason code. The API authenticates the subject and role before constructing that context. No role from an HTTP header or request body is used.
+The .NET 10 solution has a framework-independent `Core`, an authenticated API/MCP gateway, and a seeded CRM SDK server. `AuthorizationPolicy` is the single immutable role and argument policy for both REST evaluation and MCP execution. It matches names exactly with ordinal comparison and defaults to deny. The gateway does not take role or identity from client headers or tool arguments.
 
-| Tool | viewer | operator | admin |
+```text
+SDK MCP client → JWT validation at /mcp → validated subject and role
+  → SDK tools/call handler → AuthorizationPolicy → catalog check
+  → SDK Streamable HTTP client → loopback CRM MCP server
+```
+
+| Tool | Viewer | Operator | Admin |
 | --- | --- | --- | --- |
 | `crm.get_customer` | allow | allow | allow |
 | `crm.list_orders` | allow | allow | allow |
@@ -10,10 +16,20 @@
 | `crm.delete_customer` | deny | deny | allow |
 | `crm.export_customers` | deny | deny | allow |
 
-`crm.update_order` requires a nonnegative JSON number named `amount` representable as decimal. Missing, malformed and excessive amounts deny. Unknown tool names deny. The amount threshold is a demo policy constant, not a production business rule.
+`crm.update_order` requires one nonnegative JSON decimal `amount`. Missing, malformed, duplicate, and excessive amounts are blocked before forwarding. A bounded raw JSON guard rejects duplicate properties before the SDK decodes argument objects into dictionaries. Unknown and case-mismatched tool names are denied even when called without discovery. The amount limit is a demo policy constant.
 
-The API validates signature, HS256 algorithm, exact issuer and audience, expiration with zero clock skew, and exactly one nonblank subject and valid role. The signing key must be cryptographically random, supplied externally, and startup fails without at least 32 UTF-8 bytes. Length does not prove entropy. The unauthenticated demo token issuer is registered only in Development and checks the transport peer address for loopback without trusting forwarded IP headers; the API refuses the demo issuer outside Development. Development deployments should also bind to loopback and never expose the demo route through a reverse proxy: a proxy connecting locally appears as the loopback peer regardless of the original client's address. Production requires a distinct configured issuer and key but has no issuer or identity management endpoint. Deployment authentication, key rotation and trusted identity provider integration remain future work.
+## Startup and execution
 
-The evaluation endpoint returns only the decision and reason code. It performs no MCP call, CRM operation, forwarding or audit persistence. Consequently, it offers no zero-upstream-invocation guarantee. Its decision is illustrative until the next milestone integrates enforcement at the MCP gateway. It must not be used as a stand-alone check followed by an unrelated tool call. Arguments and tokens are not included in decision responses or application-authored logs. The demo token issuance response necessarily contains the token.
+The API creates an internal CRM server bound to an ephemeral `127.0.0.1` port. Before opening the public gateway listener, it creates an official SDK `McpClient` in Streamable HTTP mode, discovers the full CRM tool catalog, and verifies the five exact names. A failed connection or invalid catalog prevents gateway startup. The internal server has seeded, non-sensitive data and in-process invocation counters for tests; there is no public CRM or counter endpoint.
 
-This milestone was informed by MCP Sentinel's default-deny and exact-name policy patterns without copying its gateway.
+`MapMcp("/mcp").RequireAuthorization()` applies the same JWT configuration as the REST endpoint. Signature, HS256 algorithm, issuer, audience, expiration and exactly one valid subject and role are checked. Authentication or policy evaluation failure denies. Only an explicit allow for a discovered name enters `CallToolAsync`; denied requests do not invoke the CRM. The SDK owns MCP framing, discovery, serialization and tool error semantics. A completed upstream tool error remains an MCP tool error. The gateway adapts completed results to the downstream protocol revision, including older revisions without structured content.
+
+Startup discovery and each forwarded operation have ten-second budgets. The upstream HTTP client disallows redirects and system proxies. Caller cancellation is linked to the forwarding budget. The application has no retry loop, but SDK continuation can reissue an allowed upstream request. Cancellation, timeout or error **after forwarding** does not establish that no upstream side effect occurred; exactly-once execution is not guaranteed.
+
+## Security limits
+
+The demo issuer operates only in Development for loopback transport peers, never from forwarded IP headers. A reverse proxy connecting locally would itself be a loopback peer, so do not expose the demo route through one. The signing key must be externally supplied and cryptographically random; length alone does not verify entropy. Production requires a distinct configured issuer and key, but production identity management and key rotation are not included.
+
+The CRM listener is loopback-only, but another local process could reach it directly and bypass the gateway. Host isolation is required before using this pattern with real data. CRM data and tool schemas are demonstration content; no prompt-injection filtering or durable audit exists. SDK diagnostic logging is disabled, and application code does not log bearer tokens, credentials, tool arguments or result payloads. The demo token response necessarily contains its issued token.
+
+The REST evaluation endpoint never executes a tool. Dashboard, SQLite persistence, enterprise identity providers, multitenancy, multiple upstream servers, approvals and cloud deployment remain out of scope.
