@@ -91,6 +91,20 @@ app.MapGet("/api/audit", async (int? limit, long? cursor, SqliteAuditStore store
         return Results.Json(new { code = "AuditUnavailable" }, statusCode: StatusCodes.Status503ServiceUnavailable);
     }
 }).RequireAuthorization("AuditAdmin");
+app.MapGet("/api/audit/terminal/{correlationId}", async (string correlationId, SqliteAuditStore store, CancellationToken token) =>
+{
+    if (correlationId.Length != 32 || correlationId.Any(character => character is not (>= '0' and <= '9' or >= 'a' and <= 'f')))
+        return Results.BadRequest(new { code = "InvalidCorrelationId" });
+    try
+    {
+        var terminal = await store.ReadTerminalAsync(correlationId, token);
+        return terminal is null ? Results.NotFound() : Results.Ok(terminal);
+    }
+    catch (Exception) when (!token.IsCancellationRequested)
+    {
+        return Results.Json(new { code = "AuditUnavailable" }, statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+}).RequireAuthorization("AuditAdmin");
 app.MapGet("/api/security/overview", async (SqliteAuditStore store, CancellationToken token) =>
 {
     try { return Results.Ok(await store.ReadOverviewAsync(token)); }

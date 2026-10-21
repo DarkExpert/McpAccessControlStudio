@@ -8,6 +8,8 @@ public sealed record SecurityAuditEvent(long Id, string CorrelationId, string Ki
     string Enforcement, string UpstreamStatus, string? ErrorCategory, long DurationMs);
 
 public sealed record AuditPage(IReadOnlyList<SecurityAuditEvent> Items, long? NextCursor);
+public sealed record TerminalAuditMetadata(string CorrelationId, string Decision, string ReasonCode,
+    string Enforcement, string UpstreamStatus, string? ErrorCategory, long DurationMs);
 public sealed record SecurityOverview(long PersistedTerminalCount, long Allowed, long Denied,
     long Forwarded, long Blocked, long Succeeded, long ToolErrors, long Unknown);
 
@@ -123,6 +125,22 @@ public sealed class SqliteAuditStore : IAuditWriter
         var hasMore = items.Count > limit;
         if (hasMore) items.RemoveAt(limit);
         return new(items, hasMore ? items[^1].Id : null);
+    }
+
+    public async Task<TerminalAuditMetadata?> ReadTerminalAsync(string correlationId, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT decision, reason_code, enforcement, upstream_status, error_category, duration_ms
+            FROM audit_events WHERE correlation_id = $correlation AND kind = 'Terminal'
+            ORDER BY id DESC LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$correlation", correlationId);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken)) return null;
+        return new(correlationId, reader.GetString(0), reader.GetString(1), reader.GetString(2),
+            reader.GetString(3), reader.IsDBNull(4) ? null : reader.GetString(4), reader.GetInt64(5));
     }
 
     public async Task<SecurityOverview> ReadOverviewAsync(CancellationToken cancellationToken)

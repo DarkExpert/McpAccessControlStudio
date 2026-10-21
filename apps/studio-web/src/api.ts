@@ -20,6 +20,15 @@ export interface AuditEvent {
   durationMs: number
 }
 export interface AuditPage { items: AuditEvent[]; nextCursor: number | null }
+export interface TerminalAuditMetadata {
+  correlationId: string
+  decision: 'Allow' | 'Deny'
+  reasonCode: string
+  enforcement: 'Blocked' | 'Forwarded'
+  upstreamStatus: string
+  errorCategory: string | null
+  durationMs: number
+}
 export interface SecurityOverview {
   persistedTerminalCount: number
   allowed: number
@@ -76,18 +85,14 @@ export function fetchAudit(token: string, cursor?: number, signal?: AbortSignal)
   return request(`/api/audit?${query}`, authorized(token), signal)
 }
 
-export async function findTerminalEvent(token: string, correlationId: string, signal?: AbortSignal): Promise<AuditEvent | null> {
-  let cursor: number | undefined
-  for (let page = 0; page < 3; page++) {
-    const query = new URLSearchParams({ limit: '100' })
-    if (cursor !== undefined) query.set('cursor', String(cursor))
-    const result = await request<AuditPage>(`/api/audit?${query}`, authorized(token), signal)
-    const found = result.items.find(entry => entry.kind === 'Terminal' && entry.correlationId === correlationId)
-    if (found) return found
-    if (result.nextCursor === null) return null
-    cursor = result.nextCursor
+export async function findTerminalEvent(token: string, correlationId: string, signal?: AbortSignal): Promise<TerminalAuditMetadata | null> {
+  if (!/^[a-f0-9]{32}$/.test(correlationId)) return null
+  try {
+    return await request<TerminalAuditMetadata>(`/api/audit/terminal/${correlationId}`, authorized(token), signal)
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return null
+    throw error
   }
-  return null
 }
 
 export function sessionValid(session: TokenSession | null, identity: Identity): session is TokenSession {
