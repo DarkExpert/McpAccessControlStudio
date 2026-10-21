@@ -57,6 +57,11 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJw
 builder.Services.AddAuthorization();
 builder.Services.AddAuthorizationBuilder().AddPolicy("AuditAdmin", policyBuilder =>
     policyBuilder.RequireAuthenticatedUser().RequireRole(nameof(StudioRole.Admin)));
+if (builder.Environment.IsDevelopment())
+    builder.Services.AddCors(options => options.AddPolicy("StudioLocal", cors => cors
+        .WithOrigins("http://127.0.0.1:5173")
+        .WithMethods("GET", "POST", "DELETE")
+        .AllowAnyHeader()));
 var auditPath = builder.Configuration["Audit:DatabasePath"];
 if (string.IsNullOrWhiteSpace(auditPath))
     auditPath = Path.Combine(builder.Environment.ContentRootPath, "data", "security-audit.db");
@@ -68,10 +73,13 @@ var app = builder.Build();
 app.Lifetime.ApplicationStopped.Register(() => gateway.DisposeAsync().AsTask().GetAwaiter().GetResult());
 await app.Services.GetRequiredService<SqliteAuditStore>().InitializeAsync();
 await gateway.InitializeAsync();
+if (app.Environment.IsDevelopment()) app.UseCors("StudioLocal");
 app.UseAuthentication();
 app.UseAuthorization();
 app.Use(McpRequestGuard.CheckAsync);
 app.MapMcp("/mcp").RequireAuthorization();
+app.MapGet("/api/security/policy", (AuthorizationPolicy policy) => Results.Ok(policy.DescribeTools()))
+    .RequireAuthorization();
 
 app.MapGet("/api/audit", async (int? limit, long? cursor, SqliteAuditStore store, CancellationToken token) =>
 {

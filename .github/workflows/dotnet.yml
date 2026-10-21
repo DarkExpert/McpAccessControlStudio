@@ -12,9 +12,29 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: apps/studio-web/package-lock.json
       - run: dotnet restore
       - run: dotnet build -c Release --no-restore
       - name: Full Release suite including audit security regressions
         run: dotnet test -c Release --no-build
       - name: Real MCP and SQLite restart demonstration
         run: pwsh -File ./scripts/run-demo.ps1
+      - name: Install web dependencies
+        working-directory: apps/studio-web
+        run: npm ci
+      - name: Frontend unit tests
+        working-directory: apps/studio-web
+        run: npm test
+      - name: Frontend production build and TypeScript checks
+        working-directory: apps/studio-web
+        run: npm run build
+      - name: Install browser for real Playground verification
+        working-directory: apps/studio-web
+        run: npx playwright install --with-deps chromium
+      - name: Real browser MCP Playground scenarios
+        working-directory: apps/studio-web
+        run: npm run e2e
