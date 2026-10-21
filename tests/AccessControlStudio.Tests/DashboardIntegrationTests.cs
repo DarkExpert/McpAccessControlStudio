@@ -100,9 +100,48 @@ public class DashboardIntegrationTests
         Assert.Contains(events, entry => entry.Kind == "Decision" && entry.Enforcement == "Pending");
         Assert.Contains(events, entry => entry.Kind == "Terminal" && entry.Enforcement == "Blocked" && entry.Subject == "viewer");
         Assert.Equal(0, factory.Services.GetRequiredService<CrmTools>().InvocationCount("crm.delete_customer"));
+        var admin = await Token(http, "admin");
+        using var terminalRequest = new HttpRequestMessage(HttpMethod.Get, $"/api/audit/terminal/{correlation}");
+        terminalRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", admin);
+        using var terminalResponse = await http.SendAsync(terminalRequest);
+        Assert.Equal(HttpStatusCode.OK, terminalResponse.StatusCode);
+        using var terminalJson = JsonDocument.Parse(await terminalResponse.Content.ReadAsStringAsync());
+        Assert.Equal(correlation, terminalJson.RootElement.GetProperty("correlationId").GetString());
+        Assert.Equal("Blocked", terminalJson.RootElement.GetProperty("enforcement").GetString());
+        Assert.Equal("RoleDenied", terminalJson.RootElement.GetProperty("reasonCode").GetString());
+        Assert.False(terminalJson.RootElement.TryGetProperty("subject", out _));
+        Assert.False(terminalJson.RootElement.TryGetProperty("role", out _));
+        Assert.False(terminalJson.RootElement.TryGetProperty("arguments", out _));
         using var forbidden = await http.SendAsync(new HttpRequestMessage(HttpMethod.Get, "/api/audit")
         { Headers = { Authorization = new AuthenticationHeaderValue("Bearer", viewer) } });
         Assert.Equal(HttpStatusCode.Forbidden, forbidden.StatusCode);
+    }
+
+    [Fact]
+    public async Task TerminalLookupRequiresAdminAndValidOpaqueCorrelationId()
+    {
+        using var factory = Factory();
+        using var http = factory.CreateClient();
+        var id = Guid.NewGuid().ToString("N");
+        using var anonymous = await http.GetAsync($"/api/audit/terminal/{id}");
+        Assert.Equal(HttpStatusCode.Unauthorized, anonymous.StatusCode);
+        foreach (var identity in new[] { "viewer", "operator" })
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, $"/api/audit/terminal/{id}");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await Token(http, identity));
+            using var forbidden = await http.SendAsync(request);
+            Assert.Equal(HttpStatusCode.Forbidden, forbidden.StatusCode);
+        }
+        var admin = await Token(http, "admin");
+        http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", admin);
+        using var malformed = await http.GetAsync("/api/audit/terminal/not-an-opaque-id");
+        Assert.Equal(HttpStatusCode.BadRequest, malformed.StatusCode);
+        Assert.Contains("InvalidCorrelationId", await malformed.Content.ReadAsStringAsync());
+        using var uppercase = await http.GetAsync("/api/audit/terminal/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+        Assert.Equal(HttpStatusCode.BadRequest, uppercase.StatusCode);
+        using var missing = await http.GetAsync($"/api/audit/terminal/{id}");
+        Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
+        Assert.DoesNotContain("audit_events", await missing.Content.ReadAsStringAsync());
     }
 
     [Fact]

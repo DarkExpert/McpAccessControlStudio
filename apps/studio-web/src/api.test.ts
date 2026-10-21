@@ -39,19 +39,22 @@ describe('audit cursor handling', () => {
     expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer admin-secret')
   })
 
-  it('finds a persisted Terminal event by correlation across pages', async () => {
-    vi.mocked(fetch)
-      .mockReturnValueOnce(respond({ items: [{ kind: 'Decision', correlationId: 'target' }], nextCursor: 20 }))
-      .mockReturnValueOnce(respond({ items: [{ kind: 'Terminal', correlationId: 'target', enforcement: 'Blocked' }], nextCursor: null }))
-    const found = await findTerminalEvent('admin-secret', 'target')
-    expect(found?.kind).toBe('Terminal')
-    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2)
-    expect(String(vi.mocked(fetch).mock.calls[1][0])).toContain('cursor=20')
+  it('looks up one Terminal event without pagination or token URL leakage', async () => {
+    const id = 'a'.repeat(32)
+    vi.mocked(fetch).mockReturnValue(respond({ correlationId: id, enforcement: 'Blocked' }))
+    const found = await findTerminalEvent('admin-secret', id)
+    expect(found?.enforcement).toBe('Blocked')
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1)
+    const [url, init] = vi.mocked(fetch).mock.calls[0]
+    expect(String(url)).toBe(`http://127.0.0.1:5077/api/audit/terminal/${id}`)
+    expect(String(url)).not.toContain('admin-secret')
+    expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer admin-secret')
   })
 
-  it('stops after three pages when no terminal record is found', async () => {
-    vi.mocked(fetch).mockReturnValue(respond({ items: [], nextCursor: 10 }))
-    expect(await findTerminalEvent('admin-secret', 'not-found')).toBeNull()
-    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(3)
+  it('returns no record on 404 and rejects malformed IDs before a request', async () => {
+    vi.mocked(fetch).mockReturnValue(Promise.resolve({ ok: false, status: 404 } as Response))
+    expect(await findTerminalEvent('admin-secret', 'a'.repeat(32))).toBeNull()
+    expect(await findTerminalEvent('admin-secret', 'not-an-id')).toBeNull()
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1)
   })
 })

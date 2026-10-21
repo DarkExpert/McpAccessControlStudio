@@ -38,3 +38,6 @@ jobs:
       - name: Real browser MCP Playground scenarios
         working-directory: apps/studio-web
         run: npm run e2e
+      - name: Reproduce genuine showcase assets
+        working-directory: apps/studio-web
+        run: npm run capture:showcase

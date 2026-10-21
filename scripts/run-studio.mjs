@@ -4,14 +4,16 @@ import { startLocalRuntime } from '../apps/studio-web/scripts/local-runtime.mjs'
 
 const repo = resolve(import.meta.dirname, '..')
 const web = resolve(repo, 'apps', 'studio-web')
-const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+const npmInstall = process.platform === 'win32'
+  ? [process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', 'npm ci']]
+  : ['npm', ['ci']]
 
 for (const [command, args, cwd] of [
   ['dotnet', ['restore'], repo],
   ['dotnet', ['build', '-c', 'Release', '--no-restore'], repo],
-  [npm, ['ci'], web],
+  [...npmInstall, web],
 ]) {
-  const run = spawnSync(command, args, { cwd, stdio: 'inherit', shell: process.platform === 'win32' && command === npm })
+  const run = spawnSync(command, args, { cwd, stdio: 'inherit' })
   if (run.status !== 0) process.exit(run.status || 1)
 }
 

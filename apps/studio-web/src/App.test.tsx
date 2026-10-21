@@ -27,6 +27,11 @@ beforeEach(() => {
 })
 afterEach(() => { cleanup(); vi.clearAllMocks() })
 
+const auditEntry = (id: number) => ({ id, correlationId: 'a'.repeat(32), kind: 'Terminal' as const,
+  timestampUtc: '2026-10-21T00:00:00Z', subject: 'viewer', role: 'Viewer', toolName: 'crm.delete_customer',
+  decision: 'Deny' as const, reasonCode: 'RoleDenied', enforcement: 'Blocked' as const,
+  upstreamStatus: 'NotAttempted', errorCategory: null, durationMs: 2 })
+
 it('runs a real client call with the selected role token and displays backend reason', async () => {
   render(<App />)
   fireEvent.click(screen.getByRole('button', { name: /delete customer/i }))
@@ -70,4 +75,53 @@ it('shows an error without inventing an authorization outcome when MCP fails', a
   expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'MCP call failed.')
   expect(screen.queryByText('Allowed by gateway')).toBeNull()
   expect(screen.queryByText('sensitive transport detail')).toBeNull()
+})
+
+it('keeps the requested audit page when a slower older page resolves last', async () => {
+  let resolveSlow!: (value: { items: ReturnType<typeof auditEntry>[]; nextCursor: number | null }) => void
+  vi.mocked(api.fetchAudit)
+    .mockResolvedValueOnce({ items: [auditEntry(30)], nextCursor: 20 })
+    .mockImplementationOnce(() => new Promise(resolve => { resolveSlow = resolve }))
+    .mockResolvedValueOnce({ items: [auditEntry(30)], nextCursor: 20 })
+  render(<App />)
+  fireEvent.click(screen.getByRole('button', { name: /security overview/i }))
+  fireEvent.click(screen.getByRole('button', { name: /enable admin reporting/i }))
+  await waitFor(() => expect(api.fetchAudit).toHaveBeenCalledTimes(1))
+  fireEvent.click(screen.getByRole('button', { name: /audit history/i }))
+  await screen.findByText('Page 1 · newest first · up to 25 records')
+  fireEvent.click(screen.getByRole('button', { name: /next page/i }))
+  await screen.findByText('Loading audit history')
+  fireEvent.click(screen.getByRole('button', { name: /previous page/i }))
+  await waitFor(() => expect(api.fetchAudit).toHaveBeenCalledTimes(3))
+  resolveSlow({ items: [auditEntry(19)], nextCursor: null })
+  await screen.findByText('Page 1 · newest first · up to 25 records')
+  expect(screen.queryByText('Page 2 · newest first · up to 25 records')).toBeNull()
+  expect(vi.mocked(api.fetchAudit).mock.calls[1][2]?.aborted).toBe(true)
+})
+
+it('discards an old Admin audit response after the Playground identity changes', async () => {
+  let resolveAudit!: (value: { items: ReturnType<typeof auditEntry>[]; nextCursor: number | null }) => void
+  vi.mocked(api.fetchAudit).mockImplementationOnce(() => new Promise(resolve => { resolveAudit = resolve }))
+  render(<App />)
+  fireEvent.click(screen.getByRole('button', { name: /security overview/i }))
+  fireEvent.click(screen.getByRole('button', { name: /enable admin reporting/i }))
+  await waitFor(() => expect(api.fetchAudit).toHaveBeenCalledTimes(1))
+  fireEvent.click(screen.getByRole('button', { name: /security playground/i }))
+  fireEvent.click(screen.getByRole('button', { name: /operator/i }))
+  resolveAudit({ items: [auditEntry(1)], nextCursor: null })
+  fireEvent.click(screen.getByRole('button', { name: /audit history/i }))
+  expect(await screen.findByText('Open an Admin reporting session')).toBeTruthy()
+  expect(screen.queryByText('Recent decisions & outcomes')).toBeNull()
+  expect(vi.mocked(api.fetchAudit).mock.calls[0][2]?.aborted).toBe(true)
+})
+
+it('shows safe audit empty and storage-error states', async () => {
+  render(<App />)
+  fireEvent.click(screen.getByRole('button', { name: /audit history/i }))
+  fireEvent.click(screen.getByRole('button', { name: /enable admin reporting/i }))
+  expect(await screen.findByText('No records on this page')).toBeTruthy()
+  vi.mocked(api.fetchAudit).mockRejectedValueOnce(new api.ApiError(503))
+  fireEvent.click(screen.getByRole('button', { name: /refresh/i }))
+  expect(await screen.findByText('Audit history unavailable')).toBeTruthy()
+  expect(screen.getByText('Audit storage is unavailable. Counts may be incomplete.')).toBeTruthy()
 })

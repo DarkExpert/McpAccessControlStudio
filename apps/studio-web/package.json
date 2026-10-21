@@ -1,13 +1,14 @@
 {
   "name": "access-control-studio-web",
-  "version": "0.3.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 5173 --strictPort",
     "build": "tsc -b && vite build",
     "test": "vitest run",
-    "e2e": "node scripts/e2e.mjs"
+    "e2e": "node scripts/e2e.mjs",
+    "capture:showcase": "node scripts/capture-showcase.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",

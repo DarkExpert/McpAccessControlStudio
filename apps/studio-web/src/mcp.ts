@@ -34,7 +34,7 @@ export async function executeScenario(token: string, scenario: Scenario, signal:
     import('@modelcontextprotocol/sdk/client/index.js'),
     import('@modelcontextprotocol/sdk/client/streamableHttp.js'),
   ])
-  const client = new Client({ name: 'access-control-studio-web', version: '0.3.0' })
+  const client = new Client({ name: 'access-control-studio-web', version: '0.1.0' })
   const transport = new StreamableHTTPClientTransport(new URL('/mcp', API_ORIGIN), {
     requestInit: {
       headers: { Authorization: `Bearer ${token}` },

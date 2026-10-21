@@ -8,7 +8,7 @@ import {
   ApiError, fetchAudit, fetchOverview, fetchPolicy, findTerminalEvent, issueDemoToken,
   sessionValid,
 } from './api'
-import type { AuditEvent, AuditPage, SecurityOverview, TokenSession, ToolPolicy } from './api'
+import type { AuditPage, SecurityOverview, TerminalAuditMetadata, TokenSession, ToolPolicy } from './api'
 import { executeScenario, executionError } from './mcp'
 import type { ToolExecution } from './mcp'
 import { identities, scenarios, toolLabels } from './scenarios'
@@ -19,7 +19,7 @@ type RunRecord = {
   identity: Identity
   scenario: Scenario
   execution: ToolExecution
-  terminal: AuditEvent | null
+  terminal: TerminalAuditMetadata | null
   auditState: 'not-enabled' | 'persisted' | 'missing' | 'unavailable'
 }
 
@@ -134,9 +134,12 @@ function AuditView({ page, loading, error, cursorDepth, onNext, onBack, onRefres
   page: AuditPage | null; loading: boolean; error: string | null; cursorDepth: number
   onNext: () => void; onBack: () => void; onRefresh: () => void
 }) {
-  if (loading && !page) return <EmptyState icon={RefreshCw} title="Loading audit history" detail="Fetching the newest persisted records." />
-  if (error && !page) return <EmptyState icon={CircleAlert} title="Audit history unavailable" detail={error} action={<button className="secondary-button" onClick={onRefresh}>Try again</button>} />
-  if (!page?.items.length) return <EmptyState icon={Database} title="No records on this page" detail="Run a Playground scenario or return to the previous page." action={<button className="secondary-button" onClick={onRefresh}>Refresh</button>} />
+  if (loading && !page) return <EmptyState icon={RefreshCw} title="Loading audit history" detail="Fetching this page of persisted records."
+    action={cursorDepth > 1 ? <button className="secondary-button" onClick={onBack}>Previous page</button> : undefined} />
+  if (error && !page) return <EmptyState icon={CircleAlert} title="Audit history unavailable" detail={error}
+    action={<><button className="secondary-button" onClick={onRefresh}>Try again</button>{cursorDepth > 1 && <button className="secondary-button" onClick={onBack}>Previous page</button>}</>} />
+  if (!page?.items.length) return <EmptyState icon={Database} title="No records on this page" detail="Run a Playground scenario or return to the previous page."
+    action={<><button className="secondary-button" onClick={onRefresh}>Refresh</button>{cursorDepth > 1 && <button className="secondary-button" onClick={onBack}>Previous page</button>}</>} />
   return <section className="surface-card table-card"><div className="card-heading"><div><div className="eyebrow">PERSISTED SQLITE EVENTS</div><h2>Recent decisions & outcomes</h2></div><button className="secondary-button small" onClick={onRefresh}><RefreshCw size={15} /> Refresh</button></div>
     {error && <p className="inline-error" role="alert">{error}</p>}
     <div className="audit-table-wrap"><table className="audit-table"><thead><tr><th>Timestamp</th><th>Identity</th><th>Tool</th><th>Event</th><th>Decision / reason</th><th>Enforcement</th><th>Upstream</th><th>Correlation ID</th></tr></thead>
@@ -200,6 +203,9 @@ export default function App() {
   const [run, setRun] = useState<RunRecord | null>(null)
   const active = useRef<AbortController | null>(null)
   const generation = useRef(0)
+  const auditSequence = useRef(0)
+  const auditRequest = useRef<AbortController | null>(null)
+  const reportingToken = useRef<string | null>(null)
   const selectedScenario = scenarios.find(item => item.id === scenarioId) || scenarios[0]
   const reportingReady = sessionValid(reportingSession, 'admin')
 
@@ -212,6 +218,8 @@ export default function App() {
   useEffect(() => {
     if (!reportingSession) return
     return scheduleExpiry(reportingSession.expiresAtUtc, () => {
+      reportingToken.current = null
+      cancelAudit()
       setReportingSession(current => current === reportingSession ? null : current)
       setOverview(null); setAudit(null)
     })
@@ -237,6 +245,8 @@ export default function App() {
     if (next === identity) return
     generation.current++
     active.current?.abort()
+    reportingToken.current = null
+    cancelAudit()
     setIdentity(next)
     setSession(null)
     setReportingSession(null)
@@ -249,12 +259,19 @@ export default function App() {
     setRunning(false)
   }
 
+  function cancelAudit() {
+    auditSequence.current++
+    auditRequest.current?.abort()
+    auditRequest.current = null
+    setAuditLoading(false)
+  }
+
   async function loadOverview(token: string, signal?: AbortSignal) {
     const current = generation.current
     setOverviewLoading(true); setOverviewError(null)
     try { const data = await fetchOverview(token, signal); if (current === generation.current && !signal?.aborted) setOverview(data) }
     catch (error) { if (current === generation.current && !signal?.aborted) {
-      if (error instanceof ApiError && error.status === 401) { setReportingSession(null); setOverview(null); setAudit(null); setReportingError(requestMessage(error)) }
+      if (error instanceof ApiError && error.status === 401) { reportingToken.current = null; cancelAudit(); setReportingSession(null); setOverview(null); setAudit(null); setReportingError(requestMessage(error)) }
       else setOverviewError(requestMessage(error))
     } }
     finally { if (current === generation.current && !signal?.aborted) setOverviewLoading(false) }
@@ -262,13 +279,20 @@ export default function App() {
 
   async function loadAudit(token: string, cursor?: number, signal?: AbortSignal) {
     const current = generation.current
-    setAuditLoading(true); setAuditError(null)
-    try { const data = await fetchAudit(token, cursor, signal); if (current === generation.current && !signal?.aborted) setAudit(data) }
-    catch (error) { if (current === generation.current && !signal?.aborted) {
-      if (error instanceof ApiError && error.status === 401) { setReportingSession(null); setOverview(null); setAudit(null); setReportingError(requestMessage(error)) }
+    cancelAudit()
+    const requestId = auditSequence.current
+    const controller = new AbortController()
+    auditRequest.current = controller
+    const requestSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal
+    const isCurrent = () => requestId === auditSequence.current && current === generation.current &&
+      reportingToken.current === token && !requestSignal.aborted
+    setAudit(null); setAuditLoading(true); setAuditError(null)
+    try { const data = await fetchAudit(token, cursor, requestSignal); if (isCurrent()) setAudit(data) }
+    catch (error) { if (isCurrent()) {
+      if (error instanceof ApiError && error.status === 401) { reportingToken.current = null; cancelAudit(); setReportingSession(null); setOverview(null); setAudit(null); setReportingError(requestMessage(error)) }
       else setAuditError(requestMessage(error))
     } }
-    finally { if (current === generation.current && !signal?.aborted) setAuditLoading(false) }
+    finally { if (requestId === auditSequence.current) { auditRequest.current = null; setAuditLoading(false) } }
   }
 
   async function enableReporting() {
@@ -280,6 +304,7 @@ export default function App() {
     try {
       const issued = await issueDemoToken('admin', controller.signal)
       if (current !== generation.current || controller.signal.aborted) return
+      reportingToken.current = issued.accessToken
       setReportingSession(issued)
       await Promise.all([loadOverview(issued.accessToken, controller.signal), loadAudit(issued.accessToken, undefined, controller.signal)])
     } catch (error) {
@@ -305,7 +330,7 @@ export default function App() {
       }
       const execution = await executeScenario(token, scenario, controller.signal)
       if (controller.signal.aborted || current !== generation.current) return
-      let terminal: AuditEvent | null = null
+      let terminal: TerminalAuditMetadata | null = null
       let auditState: RunRecord['auditState'] = 'not-enabled'
       if (sessionValid(reportingSession, 'admin') && execution.meta?.correlationId) {
         try {
@@ -325,7 +350,7 @@ export default function App() {
   function refreshOverview() { if (reportingReady) void loadOverview(reportingSession.accessToken) }
   function refreshAudit() { if (reportingReady) void loadAudit(reportingSession.accessToken, pageCursor) }
   function nextAuditPage() {
-    if (!reportingReady || audit?.nextCursor === null || audit?.nextCursor === undefined) return
+    if (!reportingReady || auditLoading || audit?.nextCursor === null || audit?.nextCursor === undefined) return
     const cursor = audit.nextCursor
     setAuditCursors(previous => [...previous, cursor]); void loadAudit(reportingSession.accessToken, cursor)
   }
@@ -338,7 +363,7 @@ export default function App() {
   return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark"><Shield size={22} strokeWidth={2.4} /></div><div><strong>MCP Access</strong><span>CONTROL STUDIO</span></div></div>
     <div className="nav-label">WORKSPACE</div><nav aria-label="Main navigation">{navigation.map(item => {
       const Icon = item.icon
-      return <button key={item.id} className={`nav-item ${view === item.id ? 'selected' : ''}`} onClick={() => setView(item.id)}><Icon size={18} /><span>{item.label}</span>{item.id === 'playground' && <span className="nav-new">LIVE</span>}</button>
+      return <button key={item.id} aria-label={item.label} className={`nav-item ${view === item.id ? 'selected' : ''}`} onClick={() => setView(item.id)}><Icon size={18} /><span>{item.label}</span>{item.id === 'playground' && <span className="nav-new">LIVE</span>}</button>
     })}</nav>
     <div className="sidebar-bottom"><div className="sidebar-status"><span className="pulse-dot" /><div><strong>Local demo</strong><small>Real MCP · SQLite audit</small></div></div><div className="sidebar-foot">M3 SHOWCASE <span>·</span> .NET 10</div></div>
   </aside>
